@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#173d3a">
+  <title>학원 급여 관리</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <button class="brand" data-action="home" type="button" aria-label="메인 화면으로 돌아가기">
+      <span class="brand-mark" aria-hidden="true">✦</span>
+      <span class="brand-name" id="header-academy">학원 급여 관리</span>
+    </button>
+    <div class="topbar-right"><span id="session-controls"></span><span class="local-dot"></span> 로컬 컴퓨터 전용</div>
+  </header>
+  <main class="app-shell" id="app" aria-live="polite"></main>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <footer class="footer">학원 내부 업무용 MVP · 계정 인증 및 권한 확인 · 정기적으로 별도 저장소에 백업하세요.</footer>
+</body>
+</html>
