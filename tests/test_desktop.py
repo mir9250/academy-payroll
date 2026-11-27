@@ -40,7 +40,8 @@ def test_update_preserves_credentials_and_database(tmp_path):
     with TestClient(create_app(tmp_path)) as client:
         assert not client.get('/api/bootstrap').json()['setup_required']
         assert client.post('/api/auth/login', json={'login_id':'admin', 'password':'0123'}).status_code == 200
-        assert client.get(f'/api/teachers/{tid}/months/2026-08').json() == payroll_before
+        assert client.get(f'/api/teachers/{tid}/months/2026-08').json()['salary'] == payroll_before['salary']
+        assert client.get(f'/api/teachers/{tid}/months/2026-08').json()['records'] == payroll_before['records']
     with sqlite3.connect(tmp_path / 'academy_payroll.sqlite3') as db:
         assert db.execute('SELECT password_hash FROM teachers').fetchone()[0] == before
 

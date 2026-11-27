@@ -34,6 +34,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from payroll_v13 import (migrate, password_hash, verify_password, public_teacher, contract_on,
                          calculate_salary, LOGIN_FAILURE_LIMIT, LOGIN_COOLDOWN_SECONDS, PAY_TYPES, TEACHER_COLUMNS, WORK_COLUMNS, CONTRACT_COLUMNS)
 
+from payroll_v14 import (migrate_v14, calculate_salary, settlement_view, save_settlement,
+                         PRIVATE_COLUMNS, SETTLEMENT_COLUMNS, HISTORY_COLUMNS, validate_extended_backup)
+
 ROOT = Path(__file__).resolve().parent
 MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
 TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
@@ -45,13 +48,19 @@ MAX_EXCEL_BYTES = 12 * 1024 * 1024
 class TeacherInput(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     phone: str = Field(default="", max_length=40)
-    hourly_rate: int = Field(default=1, ge=1, le=1_000_000)
+    bank_name: str | None = Field(default=None, max_length=80)
+    account_number: str | None = Field(default=None, max_length=80)
+    account_holder: str | None = Field(default=None, max_length=80)
+    hourly_rate: int = Field(default=1, ge=1, le=1_000_000, strict=True)
     login_id: str | None = Field(default=None, max_length=80)
     password: str | None = Field(default=None, max_length=128)
     pay_type: str = 'hourly'
-    amount: int | None = Field(default=None, ge=1, le=1_000_000_000)
+    amount: int | None = Field(default=None, ge=1, le=1_000_000_000, strict=True)
     effective_date: str | None = None
     role: str = "teacher"
+    teacher_share_bps: int | None = Field(default=None, ge=0, le=10000, strict=True)
+    default_deduction: int | None = Field(default=None, ge=0, le=1_000_000_000_000, strict=True)
+    tax_mode: str = 'manual'
 
 
 class WorkInput(BaseModel):
@@ -77,9 +86,17 @@ def clean_teacher(data: TeacherInput) -> dict[str, Any]:
         raise HTTPException(422, '아이디는 영문·숫자·._- 3~80자로 입력해 주세요.')
     if data.role=='teacher' and data.pay_type=='hourly' and (data.amount or data.hourly_rate)>1_000_000:
         raise HTTPException(422, '시급은 1,000,000원 이하여야 합니다.')
+    if data.pay_type=='ratio' and (data.teacher_share_bps is None or data.tax_mode!='manual'):
+        raise HTTPException(422, '비율제는 강사 배분 비율과 실제 세액 직접 입력 방식을 설정해 주세요.')
     return {"name": name, "phone": data.phone.strip() if data.role=='teacher' else '',
             "hourly_rate": data.hourly_rate, "role": data.role, "login_id": login_id,
-            "pay_type": data.pay_type, "amount": data.amount or data.hourly_rate,
+            "bank_name": data.bank_name.strip() if data.bank_name is not None else None,
+            "account_number": data.account_number.strip() if data.account_number is not None else None,
+            "account_holder": data.account_holder.strip() if data.account_holder is not None else None,
+            "pay_type": data.pay_type, "amount": 0 if data.pay_type=='ratio' else data.amount or data.hourly_rate,
+            "teacher_share_bps": data.teacher_share_bps if data.pay_type=='ratio' else None,
+            "default_deduction": data.default_deduction if data.pay_type=='ratio' else None,
+            "tax_mode": "manual" if data.pay_type=='ratio' else "fixed_330",
             "effective_date": check_date(data.effective_date or date.today().isoformat())}
 
 
@@ -188,7 +205,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             "SELECT * FROM work_records WHERE teacher_id=? AND substr(work_date,1,7)=? ORDER BY work_date",
             (teacher_id, month))]
 
-    def monthly_payload(conn: sqlite3.Connection, teacher_id: int, month: str) -> dict[str, Any]:
+    def monthly_payload(conn: sqlite3.Connection, teacher_id: int, month: str, for_teacher=False) -> dict[str, Any]:
         teacher = get_teacher(conn, teacher_id)
         if teacher['role']!='teacher':
             raise HTTPException(404,'원장님은 급여 계산 대상이 아닙니다.')
@@ -196,6 +213,11 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         salary = calculate_salary(conn, teacher, month, records)
         if not salary["hourly_rate_label"]:
             salary["hourly_rate_label"] = str(teacher["hourly_rate"])
+        if for_teacher:
+            teacher = {key:teacher[key] for key in ('id','name','role','is_active','login_id','credentials_set')}
+            if salary.get('is_ratio'):
+                salary.pop('teacher_share_bps',None)
+                salary['review_reason'] = '정산 확인 필요' if salary['needs_review'] else ''
         return {"teacher": teacher, "month": month, "records": records, "salary": salary}
 
     def save_spreadsheet(conn: sqlite3.Connection, dst: Path) -> None:
@@ -217,11 +239,16 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         sheet('급여계약',CONTRACT_COLUMNS,contracts)
         sheet('재직변경',['id','teacher_id','effective_date','is_active'],events)
         sheet('정산확인',['teacher_id','month','reason'],reviews)
+        settlements=[dict(r) for r in conn.execute('SELECT * FROM ratio_settlements ORDER BY teacher_id,month')]
+        histories=[dict(r) for r in conn.execute('SELECT * FROM ratio_settlement_history ORDER BY teacher_id,month,revision')]
+        sheet('비율정산',SETTLEMENT_COLUMNS,settlements)
+        sheet('정산변경이력',HISTORY_COLUMNS,histories)
         # Include record-free monthly salary months through the current month, plus contract months.
         groups={(r['work_date'][:7],r['teacher_id']) for r in records}
         groups.update((r['month'],r['teacher_id']) for r in reviews)
+        groups.update((r['month'],r['teacher_id']) for r in settlements)
         for c in contracts:
-            if c['pay_type']=='monthly':
+            if c['pay_type'] in ('monthly','ratio'):
                 y,m=map(int,c['effective_date'][:7].split('-'))
                 end=max(date.today().strftime('%Y-%m'),c['effective_date'][:7])
                 while f'{y:04d}-{m:02d}'<=end:
@@ -236,7 +263,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             summary.append(dict(month=month,teacher_id=tid,teacher_name=by_id[tid]['name'],**payroll))
         sheet('월별급여',['month','teacher_id','teacher_name','total_minutes','gross','withholding','net','work_days','pay_type','amount','needs_review','review_reason'],summary)
         settings=get_settings(conn)
-        sheet('설정',['key','value'],[{'key':k,'value':v} for k,v in settings.items()]+[{'key':'format_version','value':'13'}])
+        sheet('설정',['key','value'],[{'key':k,'value':v} for k,v in settings.items()]+[{'key':'format_version','value':'14'}])
         for ws in wb:
             ws.freeze_panes='A2'
             ws.auto_filter.ref=ws.dimensions
@@ -296,12 +323,15 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             teachers=rows('선생님정보',TEACHER_COLUMNS[:7])
             records=rows('근무기록',WORK_COLUMNS[:8])
             settings={str(r['key']):str(r['value'] or '') for r in rows('설정',['key','value'])}
-            modern=settings.get('format_version')=='13'
-            if settings.get('format_version') not in (None,'','13'):
+            extended=settings.get('format_version')=='14'
+            modern=settings.get('format_version') in ('13','14')
+            if settings.get('format_version') not in (None,'','13','14'):
                 raise ValueError('지원하지 않는 백업 버전입니다.')
-            contracts=rows('급여계약',CONTRACT_COLUMNS) if modern else []
+            contracts=rows('급여계약',CONTRACT_COLUMNS if extended else CONTRACT_COLUMNS[:7]) if modern else []
             events=rows('재직변경',['id','teacher_id','effective_date','is_active']) if modern else []
             reviews=rows('정산확인',['teacher_id','month','reason']) if modern else []
+            settlements=rows('비율정산',SETTLEMENT_COLUMNS) if extended else []
+            histories=rows('정산변경이력',HISTORY_COLUMNS) if extended else []
             ids=set(); logins=set()
             for t in teachers:
                 tid=int(t['id']); active=int(t['is_active']); rate=int(t['hourly_rate'])
@@ -313,6 +343,11 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 if data['login_id']: logins.add(data['login_id'].casefold())
                 ids.add(tid)
                 t.update(id=tid,name=data['name'],phone=str(t['phone'] or ''),hourly_rate=rate,is_active=active,login_id=data['login_id'])
+                for field in PRIVATE_COLUMNS[1:]:
+                    value=t.get(field) if extended else ''
+                    if value is not None and (not isinstance(value,str) or len(value)>80):
+                        raise ValueError('개인정보는 80자 이하의 문자열이어야 합니다.')
+                    t[field]=value or ''
                 if not modern and t['role']=='teacher':
                     contracts.append(dict(id=len(contracts)+1,teacher_id=tid,effective_date='2000-01-01',pay_type='hourly',amount=rate,withholding_bps=330,is_active=active))
             def validate_rows(items, dates=False):
@@ -330,7 +365,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             validate_rows(contracts,True);validate_rows(events);validate_rows(records)
             for c in contracts:
                 c['amount']=int(c['amount']); c['withholding_bps']=int(c['withholding_bps']);c['is_active']=int(c['is_active'])
-                if c['pay_type'] not in PAY_TYPES or not 1<=c['amount']<=1_000_000_000 or c['withholding_bps']!=330 or c['is_active'] not in (0,1):
+                if not extended:
+                    c.update(teacher_share_bps=None,default_deduction=None,tax_mode='fixed_330')
+                ratio=c['pay_type']=='ratio'
+                if c['pay_type'] not in PAY_TYPES or not (0 if ratio else 1)<=c['amount']<=1_000_000_000 or c['withholding_bps']!=(0 if ratio else 330) or c['is_active'] not in (0,1) or ratio and not extended:
                     raise ValueError('계약 정보가 올바르지 않습니다.')
             for e in events:
                 check_date(str(e['effective_date']))
@@ -359,19 +397,24 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 r['applied_amount']=int(r['applied_amount']);r['withholding_bps']=int(r['withholding_bps'])
                 if r['applied_pay_type']=='hourly' and r['applied_amount']!=r['applied_hourly_rate']:
                     raise ValueError('기존 적용 시급과 계약 금액이 일치하지 않습니다.')
-                if r['applied_pay_type'] not in PAY_TYPES or not 1<=r['applied_amount']<=1_000_000_000 or r['withholding_bps']!=330:
+                ratio=r['applied_pay_type']=='ratio'
+                if r['applied_pay_type'] not in PAY_TYPES or not (0 if ratio else 1)<=r['applied_amount']<=1_000_000_000 or r['withholding_bps']!=(0 if ratio else 330) or ratio and not extended:
                     raise ValueError('근무일 계약 정보 오류')
             if not settings.get('academy_name','').strip() or len(settings['academy_name'])>100 or len(settings.get('principal_name',''))>80 or settings.get('withholding_bps')!='330':
                 raise ValueError('학원 설정 또는 공제율 오류')
-            return teachers,records,contracts,events,reviews,settings,modern
-        except (ValueError,TypeError,KeyError,OverflowError) as exc:
-            raise HTTPException(422,f'엑셀 복원 데이터 검증 실패: {exc}') from None
+            for row in settlements:
+                row['memo']=row.get('memo') or ''
+            validate_extended_backup(teachers,contracts,settlements,histories)
+            return teachers,records,contracts,events,reviews,settings,modern,settlements,histories
+        except (ValueError,TypeError,KeyError,OverflowError,AttributeError) as exc:
+            raise HTTPException(422,'엑셀 복원 데이터 검증에 실패했습니다. 원본 양식·계약·정산 계산·변경 이력을 확인해 주세요.') from None
         finally:
             wb.close()
 
     initialize()
     with connect() as conn:
         migrate(conn, backup_dir)
+        migrate_v14(conn, backup_dir)
     app = FastAPI(title="학원 급여 관리 MVP",docs_url=None,redoc_url=None)
     app.add_middleware(TrustedHostMiddleware,allowed_hosts=["127.0.0.1","localhost","testserver"])
 
@@ -495,22 +538,28 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     def bootstrap(request: Request):
         with lock,connect() as conn:
             user = request.state.user
-            teachers = [public_teacher(conn,r) for r in conn.execute('SELECT * FROM teachers ORDER BY is_active DESC,name,id')]
+            teachers = [public_teacher(conn,r,include_private=bool(user and user['role']=='director')) for r in conn.execute('SELECT * FROM teachers ORDER BY is_active DESC,name,id')]
             if not user or user['role']!='director':
                 # Only the chosen person's detailed payroll may be exposed to a teacher.
-                teachers = [t if user and t['id']==user['id'] else
-                            {k:t[k] for k in ('id','name','role','is_active','login_id','credentials_set')}
+                teachers = [{k:t[k] for k in ('id','name','role','is_active','login_id','credentials_set')}
                             for t in teachers if t['is_active'] or user and t['id']==user['id']]
             return {'teachers':teachers,'settings':get_settings(conn),
                     'user':{k:user[k] for k in ('id','name','role','login_id')} if user else None,
                     'setup_required':not initialized(conn)}
 
+    def insert_contract(conn, tid, t):
+        conn.execute('INSERT INTO contracts(teacher_id,effective_date,pay_type,amount,withholding_bps,teacher_share_bps,default_deduction,tax_mode) VALUES (?,?,?,?,?,?,?,?)',
+            (tid,t['effective_date'],t['pay_type'],t['amount'],0 if t['pay_type']=='ratio' else 330,t['teacher_share_bps'],t['default_deduction'],t['tax_mode']))
+
     def validate_contract(conn, tid, t):
         latest = conn.execute('SELECT * FROM contracts WHERE teacher_id=? ORDER BY effective_date DESC LIMIT 1',(tid,)).fetchone()
-        if latest and (latest['pay_type'],latest['amount']) == (t['pay_type'],t['amount']):
+        fields = ('pay_type','amount','teacher_share_bps','default_deduction','tax_mode')
+        if latest and all(latest[k]==t[k] for k in fields):
             return False
         if latest and t['effective_date'] <= latest['effective_date']:
             raise HTTPException(422, '새 계약 적용일은 마지막 계약 적용일보다 늦어야 합니다.')
+        if conn.execute("SELECT 1 FROM ratio_settlements WHERE teacher_id=? AND status='completed' AND month>=?", (tid,t['effective_date'][:7])).fetchone():
+            raise HTTPException(422,'확정된 정산 월의 계약은 변경할 수 없습니다. 다음 달 이후로 적용해 주세요.')
         # Backdated contracts cannot change any already saved work or elapsed payroll month.
         if latest and (latest['pay_type']=='monthly' or t['pay_type']=='monthly') and t['effective_date'] < date.today().replace(day=1).isoformat():
             raise HTTPException(422, '지난달 이전으로 계약을 소급할 수 없습니다.')
@@ -528,8 +577,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             try:
                 tid=conn.execute('''INSERT INTO teachers(name,phone,hourly_rate,role,login_id,password_hash)
                     VALUES (?,?,?,?,?,?)''',(t['name'],t['phone'],min(t['amount'],1_000_000) if t['pay_type']=='hourly' else 1,t['role'],t['login_id'],hashed)).lastrowid
+                conn.execute('UPDATE teachers SET bank_name=?,account_number=?,account_holder=? WHERE id=?', (t['bank_name'] or '',t['account_number'] or '',t['account_holder'] or '',tid))
                 if t['role']=='teacher':
-                    conn.execute('INSERT INTO contracts(teacher_id,effective_date,pay_type,amount) VALUES (?,?,?,?)',(tid,t['effective_date'],t['pay_type'],t['amount']))
+                    insert_contract(conn,tid,t)
                 conn.commit()
             except sqlite3.IntegrityError:
                 raise HTTPException(409,'이미 사용 중인 로그인 아이디입니다.') from None
@@ -551,13 +601,16 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             changed=t['role']=='teacher' and validate_contract(conn,teacher_id,t)
             try:
                 conn.execute('UPDATE teachers SET name=?,phone=?,login_id=? WHERE id=?',(t['name'],t['phone'],login_id,teacher_id))
+                for field in ('bank_name','account_number','account_holder'):
+                    if t[field] is not None:
+                        conn.execute(f'UPDATE teachers SET {field}=? WHERE id=?', (t[field],teacher_id))
                 if hashed:
                     conn.execute('UPDATE teachers SET password_hash=? WHERE id=?',(hashed,teacher_id))
                 if hashed or login_id!=old['login_id']:
                     conn.execute('DELETE FROM sessions WHERE teacher_id=?',(teacher_id,))
                     conn.execute('DELETE FROM auth_attempts WHERE key=?',(f'account:{teacher_id}',))
                 if changed:
-                    conn.execute('INSERT INTO contracts(teacher_id,effective_date,pay_type,amount) VALUES (?,?,?,?)',(teacher_id,t['effective_date'],t['pay_type'],t['amount']))
+                    insert_contract(conn,teacher_id,t)
                     if t['pay_type']=='hourly':
                         conn.execute('UPDATE teachers SET hourly_rate=? WHERE id=?',(t['amount'],teacher_id))
                 conn.commit()
@@ -583,10 +636,10 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             return {'teacher':get_teacher(conn,teacher_id),'backup':backup_after_change(conn)}
 
     @app.get("/api/teachers/{teacher_id}/months/{month}")
-    def teacher_month(teacher_id: int,month: str):
+    def teacher_month(teacher_id: int,month: str, request: Request):
         check_month(month)
         with lock,connect() as conn:
-            return monthly_payload(conn,teacher_id,month)
+            return monthly_payload(conn,teacher_id,month,for_teacher=request.state.user['role']=='teacher')
 
     @app.put("/api/teachers/{teacher_id}/records/{work_date}")
     def upsert_record(teacher_id: int,work_date: str,payload: WorkInput):
@@ -612,7 +665,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 minutes=excluded.minutes,updated_at=CURRENT_TIMESTAMP""",
                 (teacher_id,work_date,payload.start_time,payload.end_time,minutes,applied_rate,pay_type,amount,bps))
             conn.commit()
-            return {"month":monthly_payload(conn,teacher_id,work_date[:7]),"backup":backup_after_change(conn)}
+            return {"month":monthly_payload(conn,teacher_id,work_date[:7],for_teacher=True),"backup":backup_after_change(conn)}
 
     @app.delete("/api/teachers/{teacher_id}/records/{work_date}")
     def delete_record(teacher_id: int,work_date: str):
@@ -625,7 +678,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             if not cur.rowcount:
                 raise HTTPException(404,"삭제할 근무기록이 없습니다.")
             conn.commit()
-            return {"month":monthly_payload(conn,teacher_id,work_date[:7]),"backup":backup_after_change(conn)}
+            return {"month":monthly_payload(conn,teacher_id,work_date[:7],for_teacher=True),"backup":backup_after_change(conn)}
 
     @app.get("/api/overview/{month}")
     def overview(month: str):
@@ -636,6 +689,25 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             return {"month":month,"items":items,
                     "needs_review":any(item["salary"]["needs_review"] for item in items),
                     "totals":{k:sum(item["salary"][k] or 0 for item in items) for k in ("total_minutes","work_days","gross","withholding","net")}}
+
+    @app.get('/api/teachers/{teacher_id}/settlements/{month}')
+    def get_settlement(teacher_id: int, month: str):
+        check_month(month)
+        with lock, connect() as conn:
+            teacher = get_teacher(conn, teacher_id)
+            if teacher['role']!='teacher':
+                raise HTTPException(422, '일반 선생님만 정산 대상입니다.')
+            return settlement_view(conn, teacher_id, month)
+
+    @app.put('/api/teachers/{teacher_id}/settlements/{month}')
+    def put_settlement(teacher_id: int, month: str, payload: dict, request: Request):
+        check_month(month)
+        with lock, connect() as conn:
+            get_teacher(conn, teacher_id)
+            conn.execute('BEGIN IMMEDIATE')
+            save_settlement(conn, teacher_id, month, payload, request.state.user['id'])
+            conn.commit()
+            return {'settlement':settlement_view(conn,teacher_id,month), 'backup':backup_after_change(conn)}
 
     @app.put('/api/teachers/{teacher_id}/review/{month}')
     def mark_review(teacher_id: int,month: str,payload: dict):
@@ -681,7 +753,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         content=await file.read(MAX_EXCEL_BYTES+1)
         if len(content)>MAX_EXCEL_BYTES:
             raise HTTPException(413,"엑셀 파일이 너무 큽니다(최대 12MB).")
-        teachers,records,contracts,events,reviews,settings,modern = parse_restore(content)
+        teachers,records,contracts,events,reviews,settings,modern,settlements,histories = parse_restore(content)
         with lock,connect() as conn:
             current={r['id']:dict(r) for r in conn.execute('SELECT * FROM teachers')}
             # Excel never contains password hashes. Retain credentials only for matching identities.
@@ -701,7 +773,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 conn.backup(dst)
             try:
                 conn.execute('BEGIN IMMEDIATE')
-                for table in ('sessions','payroll_reviews','employment_events','contracts','work_records','teachers'):
+                for table in ('sessions','ratio_settlement_history','ratio_settlements','payroll_reviews','employment_events','contracts','work_records','teachers'):
                     conn.execute(f'DELETE FROM {table}')
                 def insert(table,columns,items):
                     for item in items:
@@ -709,6 +781,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 insert('teachers',TEACHER_COLUMNS+['password_hash'],teachers)
                 insert('work_records',WORK_COLUMNS,records)
                 insert('contracts',CONTRACT_COLUMNS,contracts)
+                insert('ratio_settlements',SETTLEMENT_COLUMNS,settlements)
+                insert('ratio_settlement_history',HISTORY_COLUMNS,histories)
                 insert('employment_events',['id','teacher_id','effective_date','is_active'],events)
                 insert('payroll_reviews',['teacher_id','month','reason'],reviews)
                 for k in ('academy_name','principal_name'):

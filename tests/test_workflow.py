@@ -42,7 +42,7 @@ def test_full_payroll_backup_restore(tmp_path):
         assert response.status_code==200
         excel=response.content
         wb=load_workbook(io.BytesIO(excel),data_only=True)
-        assert wb.sheetnames==['선생님정보','근무기록','급여계약','재직변경','정산확인','월별급여','설정']
+        assert wb.sheetnames==['선생님정보','근무기록','급여계약','재직변경','정산확인','비율정산','정산변경이력','월별급여','설정']
         assert wb['근무기록'].max_row==3
         assert wb['월별급여']['E2'].value==126000
         wb.close()

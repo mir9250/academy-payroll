@@ -13,10 +13,10 @@ from fastapi import HTTPException
 LOGIN_FAILURE_LIMIT = 5
 LOGIN_COOLDOWN_SECONDS = 300
 
-PAY_TYPES = {'hourly': '시급', 'daily': '일급', 'monthly': '월급'}
-TEACHER_COLUMNS = ['id', 'name', 'phone', 'hourly_rate', 'role', 'is_active', 'created_at', 'login_id']
+PAY_TYPES = {'hourly': '시급', 'daily': '일급', 'monthly': '월급', 'ratio': '비율'}
+TEACHER_COLUMNS = ['id', 'name', 'phone', 'hourly_rate', 'role', 'is_active', 'created_at', 'login_id', 'bank_name', 'account_number', 'account_holder']
 WORK_COLUMNS = ['id', 'teacher_id', 'work_date', 'start_time', 'end_time', 'minutes', 'applied_hourly_rate', 'updated_at', 'applied_pay_type', 'applied_amount', 'withholding_bps']
-CONTRACT_COLUMNS = ['id', 'teacher_id', 'effective_date', 'pay_type', 'amount', 'withholding_bps', 'is_active']
+CONTRACT_COLUMNS = ['id', 'teacher_id', 'effective_date', 'pay_type', 'amount', 'withholding_bps', 'is_active', 'teacher_share_bps', 'default_deduction', 'tax_mode']
 
 
 def valid_pin(password):
@@ -88,8 +88,9 @@ def migrate(conn, backup_dir):
         raise
 
 
-def public_teacher(conn, teacher):
-    result = {key: teacher[key] for key in TEACHER_COLUMNS}
+def public_teacher(conn, teacher, include_private=False):
+    private = {'phone','bank_name','account_number','account_holder'}
+    result = {key: teacher[key] for key in TEACHER_COLUMNS if include_private or key not in private}
     result['credentials_set'] = bool(teacher['password_hash'])
     contract = contract_on(conn, teacher['id'], date.today().isoformat())
     latest = conn.execute('SELECT * FROM contracts WHERE teacher_id=? ORDER BY effective_date DESC LIMIT 1', (teacher['id'],)).fetchone()
@@ -97,6 +98,10 @@ def public_teacher(conn, teacher):
     result['contract_history'] = [dict(r) for r in conn.execute('SELECT * FROM contracts WHERE teacher_id=? ORDER BY effective_date', (teacher['id'],))]
     result['review_flags']={r['month']:r['reason'] for r in conn.execute('SELECT month,reason FROM payroll_reviews WHERE teacher_id=?',(teacher['id'],))}
     result['latest_contract'] = dict(latest) if latest else None
+    result['contract_kind'] = 'ratio' if result['pay_type']=='ratio' else 'fixed'
+    result['teacher_share_bps'] = contract['teacher_share_bps'] if contract else None
+    result['default_deduction'] = contract['default_deduction'] if contract else None
+    result['tax_mode'] = contract['tax_mode'] if contract else 'fixed_330'
     return result
 
 

@@ -10,9 +10,14 @@ const state = {
   manageTab:'register', editTeacherId:null, boot:null, pageData:null,
 };
 let toastTimer;
-const PAY_LABEL = {hourly:'시급',daily:'일급',monthly:'월급',mixed:'유형 변경'};
-const contractLabel = t => t.role==='director'?'원장님':`${PAY_LABEL[t.pay_type] || '시급'} ${KRW(t.amount ?? t.hourly_rate)}`;
+const PAY_LABEL = {hourly:'시급',daily:'일급',monthly:'월급',ratio:'비율',mixed:'유형 변경'};
+const contractLabel = t => t.role==='director'?'원장님':t.pay_type==='ratio'?`비율제 · 강사 ${percent(t.teacher_share_bps)}%`:`정액제 · ${PAY_LABEL[t.pay_type] || '시급'} ${KRW(t.amount ?? t.hourly_rate)}`;
+const SETTLEMENT_STATUS={missing:'정산 정보 미입력',draft:'정산 진행 중',completed:'정산 완료'};
+function percent(bps){return bps==null?'미입력':`${Math.floor(bps/100)}.${String(bps%100).padStart(2,'0')}`.replace(/\.?0+$/,'');}
+function percentBps(value){if(!/^(?:\d{1,2}(?:\.\d{1,2})?|100(?:\.0{1,2})?)$/.test(value))throw new Error('비율은 0~100% 범위에서 소수점 두 자리까지 입력해 주세요.');const [whole,fraction='']=value.split('.');return Number(whole)*100+Number(fraction.padEnd(2,'0'));}
+const nullableMoney=value=>value===''?null:Number(value);
 const KRW = n => n===null ? '정산 확인 필요' : `${Number(n || 0).toLocaleString('ko-KR')}원`;
+const salaryMoney = (s,key) => s.is_ratio && s[key]===null ? (s.settlement_status==='draft'?'정산 중':'정산 전') : KRW(s[key]);
 const HOURS = mins => `${Math.floor(mins / 60)}시간${mins % 60 ? ` ${mins % 60}분` : ''}`;
 const escapeHtml = x => String(x ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const el = (tag, cls, text) => {const d=document.createElement(tag);d.className=cls;d.textContent=text;return d;};
@@ -32,7 +37,6 @@ async function api(url, opts={}) {
   if(!res.ok) {
     const msg = typeof payload.detail==='string' ? payload.detail : '요청을 처리하지 못했습니다.';
     if(res.status===401 && url!=='/api/auth/login' && state.boot?.user) {state.pageData=null;refresh();}
-    if(res.status===401 && url!=='/api/auth/login' && state.boot?.user){state.pageData=null;refresh();}
     const error=new Error(msg);error.status=res.status;throw error;
   }
   return payload;
@@ -149,6 +153,9 @@ async function refresh(){
     let pageData=null;
     if(route.page==='teacher' || route.page==='payslip'){
       pageData=await api(`/api/teachers/${route.teacherId}/months/${route.month}`);
+      if(route.readOnly && route.page==='teacher' && pageData.salary.is_ratio){
+        try{pageData.settlement=await api(`/api/teachers/${route.teacherId}/settlements/${route.month}`);}catch(e){if(e.status!==422)throw e;pageData.settlementUnavailable=e.message;}
+      }
     } else if(route.page==='director') {
       pageData=await api(`/api/overview/${route.month}`);
     }
@@ -166,9 +173,12 @@ async function refresh(){
 }
 function render(){
   if(state.boot.setup_required){app.innerHTML=renderSetup();return;}
+  if(state.page==='manage' && state.boot.user?.role==='teacher'){app.innerHTML=titleSection('접근 권한이 없습니다.','선생님 관리는 원장님만 이용할 수 있습니다.','director');return;}
   if(needsLogin(state,state.boot)){app.innerHTML=renderLogin();return;}
   const pages={home:renderHome,choose:renderChoose,director:renderDirector,teacher:renderTeacher,manage:renderManage,payslip:renderPayslip};
   app.innerHTML=pages[state.page] ? pages[state.page]() : renderHome();
+  if(document.getElementById('teacher-contract-kind'))syncContractFields();
+  if(document.getElementById('settlement-form'))updateSettlementPreview();
   if(state.page==='payslip') requestAnimationFrame(()=>paintPayslip(state.pageData,state.boot.settings));
 }
 function renderHome(){
@@ -179,13 +189,12 @@ function renderHome(){
     <section class="action-grid" aria-label="메인 메뉴">
       <button class="action-card" data-action="choose"><span class="action-icon">👩‍🏫</span><div class="action-title">선생님 <span class="action-arrow">↗</span></div><div class="action-desc">내 근무시간 입력 및 월별 급여 확인</div></button>
       <button class="action-card" data-action="director"><span class="action-icon">📋</span><div class="action-title">원장님 <span class="action-arrow">↗</span></div><div class="action-desc">선생님별 기록 조회 및 급여명세서</div></button>
-      <button class="action-card" data-action="manage"><span class="action-icon">⚙️</span><div class="action-title">선생님 관리 <span class="action-arrow">↗</span></div><div class="action-desc">등록 · 정보 수정 · 비활성화 · 백업</div></button>
     </section><p class="muted small" style="text-align:center">본인 계정으로 로그인해 주세요. 원장님 조회·선생님 관리는 관리자 인증이 필요합니다.</p>`;
 }
 function personButton(t,action){
   return `<button class="person-row" data-action="${action}" data-id="${t.id}">
     <span class="person-avatar">${escapeHtml(t.name.slice(0,1))}</span>
-    <span class="person-details"><strong>${escapeHtml(t.name)}</strong><span>${escapeHtml(t.login_id || '로그인 정보 미설정')}${t.amount ? ' · '+contractLabel(t):''}</span></span>
+    <span class="person-details"><strong>${escapeHtml(t.name)}</strong><span>${escapeHtml(t.login_id || '로그인 정보 미설정')}${action==='manage-edit-teacher'?' · '+contractLabel(t):''}</span></span>
     <span class="chevron">›</span></button>`;
 }
 function renderChoose(){
@@ -196,8 +205,8 @@ function renderChoose(){
 }
 function metrics(s){
   return `<div class="summary-grid"><article class="metric"><div class="label">이번 달 총 근무시간</div><div class="value">${HOURS(s.total_minutes)}</div><div class="helper">출근 ${s.work_days || 0}일 · 실제 기록 합계</div></article>
-    <article class="metric featured"><div class="label">이번 달 예상 실수령액</div><div class="value">${KRW(s.net)}</div><div class="helper">${s.needs_review?'자동 산정 보류':'세전 급여에서 3.3% 공제'}</div></article>
-    <article class="metric"><div class="label">세전 급여</div><div class="value">${KRW(s.gross)}</div><div class="helper">예상 공제액 ${KRW(s.withholding)}</div></article></div>`;
+    <article class="metric featured"><div class="label">이번 달 예상 실수령액</div><div class="value">${salaryMoney(s,'net')}</div><div class="helper">${s.is_ratio?SETTLEMENT_STATUS[s.settlement_status]:s.needs_review?'자동 산정 보류':'세전 급여에서 3.3% 공제'}</div></article>
+    <article class="metric"><div class="label">세전 급여</div><div class="value">${salaryMoney(s,'gross')}</div><div class="helper">${s.is_ratio?'실제 세액':'예상 공제액'} ${s.is_ratio && s.withholding===null?'미확정':KRW(s.withholding)}</div></article></div>`;
 }
 function calendarView(records){
   const [year,month]=state.month.split('-').map(Number);
@@ -222,20 +231,17 @@ function renderWorkForm(t, records){
   const selected=records.find(r=>r.work_date===state.selectedDate);
   if(!t.is_active) return '<div class="readonly-hint">비활성화된 선생님입니다. 관리 화면에서 재활성화한 뒤 기록을 수정할 수 있습니다.</div>';
   const workMin = selected?.minutes || 0;
-  const applied = selected ? selected.applied_amount : t.amount;
-  const payType=selected?.applied_pay_type || t.pay_type;
-  const amount = Math.floor(workMin * applied / 60);
   return `<div class="date-banner"><strong>${fmtDay(state.selectedDate)} 기록</strong><span>${selected?'기존 기록 수정':'새 근무기록'}</span></div>
     <form id="work-form"><div class="form-pair"><div class="field"><label for="start-time">출근 시각</label><input id="start-time" name="start_time" type="time" step="60" value="${selected?.start_time || ''}" required></div>
     <div class="field"><label for="end-time">퇴근 시각</label><input id="end-time" name="end_time" type="time" step="60" value="${selected?.end_time || ''}" required></div></div>
     <div class="estimate"><span>근무시간 미리보기</span><strong id="work-preview">${selected?HOURS(workMin):'-'}</strong></div>
-    <p class="muted small">${selected?'기존 기록의 적용 계약: '+PAY_LABEL[payType]+' '+KRW(applied):'현재 계약: '+contractLabel(t)} · 휴게시간 미포함 · 자정 넘김 불가</p>
+    <p class="muted small">휴게시간 미포함 · 자정 넘김 불가</p>
     <div class="form-actions"><button type="submit" class="btn">${selected?'수정 내용 저장':'근무기록 저장'}</button>${selected?'<button type="button" class="btn danger" data-action="delete-record">기록 삭제</button>':''}</div></form>`;
 }
 function tableOfRecords(records,readonly){
   if(!records.length) return '<div class="empty">이 달에 등록된 근무기록이 없습니다.</div>';
-  return `<div class="table-scroll"><table class="data-table"><thead><tr><th>근무일</th><th>출근</th><th>퇴근</th><th>근무시간</th><th>적용 계약</th>${readonly?'':'<th>수정</th>'}</tr></thead><tbody>`+
-    records.map(r=>`<tr><td>${fmtDay(r.work_date)}</td><td>${r.start_time}</td><td>${r.end_time}</td><td>${HOURS(r.minutes)}</td><td>${PAY_LABEL[r.applied_pay_type]} ${KRW(r.applied_amount)}</td>${readonly?'':`<td><button class="btn small-btn secondary" data-action="edit-day" data-date="${r.work_date}">수정</button></td>`}</tr>`).join('')+
+  return `<div class="table-scroll"><table class="data-table"><thead><tr><th>근무일</th><th>출근</th><th>퇴근</th><th>근무시간</th>${readonly?'<th>적용 계약</th>':''}${readonly?'':'<th>수정</th>'}</tr></thead><tbody>`+
+    records.map(r=>`<tr><td>${fmtDay(r.work_date)}</td><td>${r.start_time}</td><td>${r.end_time}</td><td>${HOURS(r.minutes)}</td>${readonly?`<td>${r.applied_pay_type==='ratio'?'비율제':PAY_LABEL[r.applied_pay_type]+' '+KRW(r.applied_amount)}</td>`:''}${readonly?'':`<td><button class="btn small-btn secondary" data-action="edit-day" data-date="${r.work_date}">수정</button></td>`}</tr>`).join('')+
     '</tbody></table></div>';
 }
 function renderTeacher(){
@@ -243,7 +249,7 @@ function renderTeacher(){
   const readOnly=!!state.readOnly;
   return titleSection(`${t.name} ${readOnly?'근무기록 조회':'선생님 페이지'}`,
     `${monthLabel(state.month)} · ${personRole(t.role)}${readOnly?' · 읽기 전용':''}`,readOnly?'director':'choose')+
-    `<p class="readonly-hint">현재 계약: ${contractLabel(t)}${s.needs_review?' · '+escapeHtml(s.review_reason):''}</p>`+metrics(s)+`<section class="layout-2"><div class="card">${calendarView(records)}</div>
+    (readOnly?`<p class="readonly-hint">현재 계약: ${contractLabel(t)}${s.needs_review?' · '+escapeHtml(s.review_reason):''}</p>`:'')+(readOnly && s.is_ratio?renderSettlement():'')+metrics(s)+`<section class="layout-2"><div class="card">${calendarView(records)}</div>
     <div class="card"><h2>${readOnly?'선택한 날짜의 근무기록':'출퇴근 시각 입력'}</h2>
       ${readOnly?renderReadonlyDate(records):renderWorkForm(t,records)}</div></section>
     <section class="card" style="margin-top:19px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
@@ -259,32 +265,82 @@ function renderReadonlyDate(records){
 }
 function renderDirector(){
   const {items,totals}=state.pageData;
-  return titleSection('원장님 관리 화면','전체 선생님의 월별 근무 현황을 조회하고 급여명세서를 출력합니다.')+
+  return titleSection('원장님 관리 화면','전체 선생님의 월별 근무 현황을 조회하고 급여명세서를 출력합니다.').replace('</section>','<button class="btn secondary" data-action="manage">선생님 관리</button></section>')+
     `<div class="action-strip"><button class="circle-btn" data-action="month-prev">◀</button><strong>${monthLabel(state.month)}</strong><button class="circle-btn" data-action="month-next">▶</button></div>`+
-    (state.pageData.needs_review?'<div class="warn-banner">정산 확인이 필요한 선생님이 있습니다. 합계는 산정 가능한 금액만 포함합니다.</div>':'')+metrics(totals)+`<section class="card"><h2>선생님별 월간 현황</h2><div class="person-list">`+
+    (state.pageData.needs_review?'<div class="warn-banner">정산 확인이 필요한 선생님이 있습니다.</div>':'')+`<section class="card"><h2>선생님별 월간 현황</h2><div class="person-list">`+
     (items.length?items.map(({teacher:t,salary:s})=>`<button class="person-row" data-action="open-director-teacher" data-id="${t.id}">
        <span class="person-avatar">${escapeHtml(t.name.slice(0,1))}</span>
        <span class="person-details"><strong>${escapeHtml(t.name)} ${t.is_active?'':'<span class="pill off">비활성화</span>'}</strong>
-       <span>${contractLabel(t)} · ${s.work_days}일 · ${HOURS(s.total_minutes)} · 세전 ${KRW(s.gross)} · 예상 실수령액 ${KRW(s.net)}</span></span><span class="chevron">›</span></button>`).join(''):
+       <span>${s.is_ratio?`비율제 · 강사 ${percent(s.teacher_share_bps)}% · ${SETTLEMENT_STATUS[s.settlement_status]}`:'정액제 · '+(PAY_LABEL[s.pay_type] || '')+' '+s.contract_amount_label+' · '+s.work_days+'일 · '+HOURS(s.total_minutes)} · 세전 ${salaryMoney(s,'gross')} · 예상 실수령액 ${salaryMoney(s,'net')}</span></span><span class="chevron">›</span></button>`).join(''):
       '<div class="empty">등록된 선생님이 없습니다.</div>')+'</div></section>';
 }
 function teacherFields(t){
   const editing=!!t;
   t=t || {name:'',phone:'',role:'teacher',login_id:'',pay_type:'hourly',amount:16000};
-  const latest=t.latest_contract;
-  const payType=latest?.pay_type || t.pay_type;
-  const amount=latest?.amount || t.amount;
+  const latest=t.latest_contract || t;
+  const ratio=latest.pay_type==='ratio', type=ratio?'hourly':latest.pay_type;
   return `<div class="form-pair"><div class="field"><label for="teacher-name">이름 *</label><input id="teacher-name" name="name" required maxlength="80" value="${escapeHtml(t.name)}"></div>
     <div class="field"><label for="teacher-role">역할</label><select id="teacher-role" name="role" ${editing?'disabled':''}><option value="teacher" ${t.role==='teacher'?'selected':''}>일반 선생님</option><option value="director" ${t.role==='director'?'selected':''}>원장님</option></select>${editing?`<input type="hidden" name="role" value="${t.role}">`:''}</div></div>
     <div class="form-pair"><div class="field"><label for="teacher-login">로그인 아이디 *</label><input id="teacher-login" name="login_id" required pattern="[A-Za-z0-9_.-]{3,80}" maxlength="80" autocomplete="off" value="${escapeHtml(t.login_id || '')}"></div>
     <div class="field"><label for="teacher-password">${editing && t.credentials_set?'새 비밀번호 (숫자 4자리, 변경 시에만 입력)':'비밀번호 (숫자 4자리) *'}</label><input id="teacher-password" name="password" type="password" inputmode="numeric" pattern="[0-9]{4}" minlength="4" maxlength="4" title="숫자 4자리로 입력해 주세요." autocomplete="new-password" ${!editing || !t.credentials_set?'required':''}></div></div>
     <div id="teacher-pay-fields" ${t.role==='director'?'hidden':''}>
-    <div class="field"><label for="teacher-phone">전화번호</label><input id="teacher-phone" name="phone" maxlength="40" value="${escapeHtml(t.phone)}"></div>
-    <div class="form-pair"><div class="field"><label for="teacher-pay-type">급여 계약 유형</label><select id="teacher-pay-type" name="pay_type">${Object.entries(PAY_LABEL).filter(([k])=>k!=='mixed').map(([k,v])=>`<option value="${k}" ${payType===k?'selected':''}>${v}제</option>`).join('')}</select></div>
-    <div class="field"><label id="teacher-amount-label" for="teacher-amount">${PAY_LABEL[payType]} (원/${payType==='daily'?'근무일':payType==='monthly'?'월':'시간'}) *</label><input id="teacher-amount" name="amount" type="number" min="1" max="1000000000" step="1" value="${amount || 16000}" ${t.role==='teacher'?'required':''}></div></div>
+    <div class="form-pair">${[['phone','전화번호',40],['bank_name','은행명',80],['account_number','계좌번호',80],['account_holder','예금주',80]].map(([key,label,max])=>`<div class="field"><label for="teacher-${key.replaceAll('_','-')}">${label}</label><input id="teacher-${key.replaceAll('_','-')}" name="${key}" type="text" maxlength="${max}" value="${escapeHtml(t[key] || '')}"></div>`).join('')}</div>
+    <div class="field"><label for="teacher-contract-kind">급여 계약 구분</label><select id="teacher-contract-kind" name="contract_kind"><option value="fixed" ${ratio?'':'selected'}>정액제</option><option value="ratio" ${ratio?'selected':''}>비율제</option></select></div>
+    <div id="fixed-contract-fields" ${ratio?'hidden':''}><div class="form-pair"><div class="field"><label for="teacher-pay-type">정액제 급여 형태</label><select id="teacher-pay-type" name="pay_type">${['hourly','daily','monthly'].map(k=>`<option value="${k}" ${type===k?'selected':''}>${PAY_LABEL[k]}제</option>`).join('')}</select></div>
+    <div class="field"><label id="teacher-amount-label" for="teacher-amount">${{hourly:'시간당 급여',daily:'일일 급여',monthly:'월 급여'}[type]} (원) *</label><input id="teacher-amount" name="amount" type="number" min="1" max="1000000000" step="1" value="${ratio?16000:latest.amount || 16000}" ${t.role==='teacher'&&!ratio?'required':''}></div></div></div>
+    <div id="ratio-contract-fields" ${ratio?'':'hidden'}><div class="form-pair"><div class="field"><label>강사 배분 비율 (%)<input id="teacher-share" name="teacher_share_percent" type="number" min="0" max="100" step="0.01" value="${ratio?percent(latest.teacher_share_bps):''}" ${ratio&&t.role==='teacher'?'required':''}></label></div>
+    <div class="field"><label>학원 배분 비율 (%)<input id="academy-share" readonly value="${ratio?percent(10000-latest.teacher_share_bps):''}"></label></div>
+    <div class="field"><label>기본공제액 기본값 (원, 선택)<input name="default_deduction" type="number" min="0" max="1000000000000" step="1" value="${latest.default_deduction ?? ''}"></label></div>
+    <div class="field"><label>세금 처리 방식<select name="tax_mode"><option value="manual">월별 실제 세액 직접 입력</option></select></label></div></div></div>
     <div class="field"><label for="contract-date">${editing?'새 계약 적용 시작일 (계약 변경 시)':'계약 적용 시작일'}</label><input id="contract-date" name="effective_date" type="date" value="${defaultDay}"></div>
-    <p class="muted small">계약 이력과 과거 근무일의 적용 금액은 보존됩니다. 월중 유형 변경 및 월급제 중도 변경은 정산 확인이 필요합니다.</p>
-    ${t.contract_history?.length?`<details><summary>급여 계약 이력</summary>${t.contract_history.map(c=>`<p class="small">${c.effective_date} · ${PAY_LABEL[c.pay_type]} ${KRW(c.amount)}</p>`).join('')}</details>`:''}</div>`;
+    <p class="muted small">계약 변경 이력과 과거 기록은 보존됩니다. 월중 유형 변경·월급제·비율제 중도 변경은 정산 확인이 필요합니다.</p>
+    ${t.contract_history?.length?`<details><summary>급여 계약 이력</summary>${t.contract_history.map(c=>`<p class="small">${c.effective_date} · ${c.pay_type==='ratio'?'비율제 · 강사 '+percent(c.teacher_share_bps)+'%':PAY_LABEL[c.pay_type]+' '+KRW(c.amount)}</p>`).join('')}</details>`:''}</div>`;
+}
+
+function syncContractFields(){
+  const director=document.getElementById('teacher-role').value==='director';
+  const ratio=document.getElementById('teacher-contract-kind').value==='ratio';
+  document.getElementById('teacher-pay-fields').hidden=director;
+  document.getElementById('teacher-pay-fields').querySelectorAll('input,select').forEach(x=>x.disabled=director);
+  document.getElementById('fixed-contract-fields').hidden=ratio;
+  document.getElementById('fixed-contract-fields').querySelectorAll('input,select').forEach(x=>x.disabled=director||ratio);
+  document.getElementById('ratio-contract-fields').hidden=!ratio;
+  document.getElementById('ratio-contract-fields').querySelectorAll('input,select').forEach(x=>x.disabled=director||!ratio);
+  document.getElementById('teacher-amount').required=!director&&!ratio;
+  document.getElementById('teacher-share').required=!director&&ratio;
+}
+
+function renderSettlement(){
+  const d=state.pageData.settlement;
+  if(!d)return `<div class="warn-banner">${escapeHtml(state.pageData.settlementUnavailable || '정산 확인 필요')}</div>`;
+  return `<section class="card settlement-card"><h2>비율제 월별 정산 · ${monthLabel(state.month)}</h2><p class="pill">${SETTLEMENT_STATUS[d.status]}</p>
+    <p class="muted small">총원비는 담당 학생들의 해당 월 금액을 합산해 입력합니다. 기본공제와 실제 세액은 별도이며, 미입력과 0원을 구분합니다.</p>
+    ${d.review_reasons.length?`<div class="warn-banner">${escapeHtml(d.review_reasons.join(' · '))} · 이 달은 자동 확정할 수 없습니다.</div>`:''}
+    <form id="settlement-form"><div class="form-pair">
+    ${[['revenue','총원비 (원)',1000000000000,1],['base_deduction','기본공제액 (원)',1000000000000,1],['teacher_share_percent','강사 배분 비율 (%)',100,.01],['tax_amount','세금 / 원천징수액 (원)',1000000000000,1]].map(([key,label,max,step])=>`<div class="field"><label>${label}<input name="${key}" type="number" min="0" max="${max}" step="${step}" value="${key==='teacher_share_percent'?percent(d.teacher_share_bps):d[key] ?? ''}"></label></div>`).join('')}
+    </div><div class="field"><label>정산 메모 (원장님 전용)<textarea name="memo" maxlength="1000">${escapeHtml(d.memo)}</textarea></label></div>
+    <div id="settlement-preview" class="readonly-hint" aria-live="polite"></div>
+    <div class="form-actions"><button type="submit" class="btn secondary" data-status="draft">진행 중으로 저장</button><button type="submit" class="btn" data-status="completed">정산 확정</button></div></form>
+    <details><summary>정산 변경 이력 (${d.history.length}건)</summary>${d.history.map(h=>{const v=JSON.parse(h.snapshot);return `<p class="small">${escapeHtml(h.changed_at)} · ${h.revision}차 · ${SETTLEMENT_STATUS[v.status]} · 총원비 ${v.revenue===null?'미입력':KRW(v.revenue)} · 기본공제 ${v.base_deduction===null?'미입력':KRW(v.base_deduction)} · 강사 ${percent(v.teacher_share_bps)}% · 세액 ${v.tax_amount===null?'미입력':KRW(v.tax_amount)} · 실수령액 ${v.net===null?'미입력':KRW(v.net)} · ${escapeHtml(v.memo)}</p>`;}).join('')}</details></section>`;
+}
+function settlementValues(form){
+  const fd=new FormData(form);
+  return {revenue:nullableMoney(fd.get('revenue')),base_deduction:nullableMoney(fd.get('base_deduction')),tax_amount:nullableMoney(fd.get('tax_amount')),teacher_share_bps:fd.get('teacher_share_percent')===''?null:percentBps(fd.get('teacher_share_percent')),memo:fd.get('memo')};
+}
+function updateSettlementPreview(){
+  const form=document.getElementById('settlement-form'), view=document.getElementById('settlement-preview');
+  if(!form || !view)return;
+  try{
+    const v=settlementValues(form), known=[v.revenue,v.base_deduction,v.tax_amount].filter(x=>x!==null);
+    if(known.some(x=>!Number.isSafeInteger(x)||x<0))throw new Error('금액은 원 단위의 0 이상 정수로 입력해 주세요.');
+    const base=v.revenue!==null && v.base_deduction!==null?v.revenue-v.base_deduction:null;
+    if(base!==null && base<0)throw new Error('기본공제액이 총원비를 초과합니다.');
+    const gross=base!==null && v.teacher_share_bps!==null?Number(BigInt(base)*BigInt(v.teacher_share_bps)/10000n):null;
+    if(gross!==null && v.tax_amount!==null && v.tax_amount>gross)throw new Error('세금이 강사 세전 급여를 초과합니다.');
+    const net=gross!==null && v.tax_amount!==null?gross-v.tax_amount:null;
+    const money=x=>x===null?'미입력':KRW(x);
+    view.textContent=`총원비 ${money(v.revenue)} · 기본공제 ${money(v.base_deduction)} · 배분 대상 ${money(base)} · 학원 ${v.teacher_share_bps===null?'미입력':percent(10000-v.teacher_share_bps)+'%'} / ${money(gross===null?null:base-gross)} · 강사 ${percent(v.teacher_share_bps)}% / 세전 ${money(gross)} · 세금 ${money(v.tax_amount)} · 최종 실수령액 ${money(net)}`;
+  }catch(e){view.textContent=e.message;}
 }
 
 function renderManage(){
@@ -307,11 +363,11 @@ function renderManage(){
       ${inactive.map(t=>`<div class="manage-row"><div><strong>${escapeHtml(t.name)}</strong><div class="note">${personRole(t.role)}</div></div>
       <button class="btn small-btn secondary" data-action="toggle-teacher" data-id="${t.id}">재활성화</button></div>`).join('')||'<div class="empty">비활성화된 선생님이 없습니다.</div>'}</div>`;
   }
-  return titleSection('선생님 관리','신규 등록, 정보 수정, 비활성화와 데이터 백업을 관리합니다.')+
+  return titleSection('선생님 관리','신규 등록, 정보 수정, 비활성화와 데이터 백업을 관리합니다.','director')+
     `<div class="tabs"><button class="tab ${tab==='register'?'active':''}" data-action="tab-register">신규 등록</button><button class="tab ${tab==='edit'?'active':''}" data-action="tab-edit">정보 수정</button><button class="tab ${tab==='status'?'active':''}" data-action="tab-status">비활성화·복구</button></div>`+
     `<div class="stack">${content}<div class="card"><h2>학원 정보</h2><form id="settings-form"><div class="form-pair"><div class="field"><label for="academy-name">학원 이름</label><input id="academy-name" name="academy_name" maxlength="100" required value="${escapeHtml(state.boot.settings.academy_name)}"></div>
     <div class="field"><label for="principal-name">급여명세서 하단 발행인 (선택)</label><input id="principal-name" name="principal_name" maxlength="80" value="${escapeHtml(state.boot.settings.principal_name)}" placeholder="원장 이름"></div></div><button class="btn secondary" type="submit">학원 정보 저장</button></form></div>
-    <div class="card"><h2>엑셀 백업 · 복원</h2><p class="muted small">등록/수정 시 서버의 data/backups 폴더에 Excel과 SQLite 백업이 자동 생성됩니다. 엑셀은 복원 가능한 원본 양식이며, 월별급여 시트는 조회용입니다.</p>
+    <div class="card"><h2>엑셀 백업 · 복원</h2><p class="muted small">등록/수정 시 서버의 data/backups 폴더에 Excel과 SQLite 백업이 자동 생성됩니다. 엑셀에는 전화번호·은행·계좌·예금주 및 원장님 전용 정산 메모가 포함됩니다. 안전하게 보관해 주세요. 월별급여 시트는 조회용입니다.</p>
       <div class="action-strip"><a class="btn secondary" href="/api/backup/excel" download>엑셀 백업 다운로드</a><button class="btn danger" data-action="restore-pick">엑셀 백업 복원</button></div>
       <input id="restore-file" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden>
       <div class="warn-banner">복원은 현재 선생님·근무기록을 파일 내용으로 전체 교체합니다. 복원 직전 원본 SQLite 안전 백업을 만들며, 별도 USB/클라우드에도 정기적으로 백업하세요.</div>
@@ -369,11 +425,11 @@ function paintPayslip(payload,settings){
   text('급여 정산 내역',96,sy+28,22,teal,'750');
   const s=payload.salary;
   const pairs=[
-    [`${PAY_LABEL[s.pay_type]}제 계약`,s.needs_review?'정산 확인 필요':s.contract_amount_label || KRW(s.amount)],
+    [s.is_ratio?'정산 상태':`${PAY_LABEL[s.pay_type]}제 계약`,s.is_ratio?SETTLEMENT_STATUS[s.settlement_status]:s.needs_review?'정산 확인 필요':s.contract_amount_label || KRW(s.amount)],
     ['총 근무시간 / 출근일수',`${HOURS(s.total_minutes)} / ${s.work_days}일`],
-    ['세전 급여',KRW(s.gross)],
-    ['원천징수세액 (3.3%)',s.withholding===null?'정산 확인 필요':`− ${KRW(s.withholding)}`],
-    ['예상 지급액',KRW(s.net)],
+    ['세전 급여',salaryMoney(s,'gross')],
+    [s.is_ratio?'실제 세액':'원천징수세액 (3.3%)',s.withholding===null?'정산 확인 필요':`− ${KRW(s.withholding)}`],
+    ['예상 지급액',salaryMoney(s,'net')],
   ];
   pairs.forEach(([a,b],i)=>{
     const y=sy+54+i*54;
@@ -383,7 +439,7 @@ function paintPayslip(payload,settings){
     text(b,804,y+27,22,i===4?teal:ink,i===4?'800':'550','right');
   });
   text(`발행: ${settings.academy_name}${settings.principal_name?' · '+settings.principal_name:''}`,450,1184,21,ink,'700','center');
-  text(s.needs_review?'정산 확인 필요 · 자동 산정 보류':'근무기록 및 계약 기준 예상 급여 · 3.3% 공제 적용 가정',450,1218,14,muted,'400','center');
+  text(s.is_ratio?'월별 정산 기준 · '+SETTLEMENT_STATUS[s.settlement_status]:s.needs_review?'정산 확인 필요 · 자동 산정 보류':'근무기록 및 계약 기준 예상 급여 · 3.3% 공제 적용 가정',450,1218,14,muted,'400','center');
 }
 
 app.addEventListener('click', async ev=>{
@@ -467,6 +523,8 @@ app.addEventListener('invalid',ev=>{
   if(ev.target.name==='password')ev.target.setCustomValidity('비밀번호는 숫자 4자리로 입력해 주세요.');
 },true);
 app.addEventListener('input',ev=>{
+  if(ev.target.closest('#settlement-form')){updateSettlementPreview();return;}
+  if(ev.target.id==='teacher-share'){try{document.getElementById('academy-share').value=percent(10000-percentBps(ev.target.value));}catch{document.getElementById('academy-share').value='';}return;}
   if(ev.target.name==='password'){
     // Fallback for autofill, composition and browsers without cancellable beforeinput.
     if(!/^[0-9]{0,4}$/.test(ev.target.value)){
@@ -500,8 +558,17 @@ app.addEventListener('submit',async ev=>{
       const body={start_time:fd.get('start_time'),end_time:fd.get('end_time')};
       const res=await api(`/api/teachers/${state.teacherId}/records/${state.selectedDate}`,json('PUT',body));
       await refresh();backupToast(res);
+    } else if(form.id==='settlement-form'){
+      const current=state.pageData.settlement;
+      let confirmed=false;
+      if(current.status==='completed'){confirmed=confirm('확정된 정산을 수정할까요? 이전 정산과 변경 이력은 보존됩니다.');if(!confirmed)return;}
+      const payload={...settlementValues(form),expected_revision:current.revision,status:ev.submitter?.dataset.status || 'draft',confirm_revision:confirmed};
+      const res=await api(`/api/teachers/${state.teacherId}/settlements/${state.month}`,json('PUT',payload));
+      await refresh();backupToast(res);
     } else if(form.id==='create-teacher-form'||form.id==='edit-teacher-form'){
       const payload={name:fd.get('name'),phone:fd.get('phone') || '',role:fd.get('role'),login_id:fd.get('login_id'),password:fd.get('password') || null,pay_type:fd.get('role')==='director'?'hourly':fd.get('pay_type'),amount:fd.get('role')==='director'?1:Number(fd.get('amount')),effective_date:fd.get('effective_date') || defaultDay};
+      for(const key of ['bank_name','account_number','account_holder'])payload[key]=fd.get(key) || '';
+      if(payload.role==='teacher' && fd.get('contract_kind')==='ratio'){payload.pay_type='ratio';payload.amount=null;payload.teacher_share_bps=percentBps(fd.get('teacher_share_percent'));payload.default_deduction=nullableMoney(fd.get('default_deduction'));payload.tax_mode='manual';}
       const editing=form.id==='edit-teacher-form';
       const res=await api(editing?`/api/teachers/${state.editTeacherId}`:'/api/teachers',json(editing?'PUT':'POST',payload));
       await refresh();backupToast(res);
@@ -519,15 +586,10 @@ app.addEventListener('change',async ev=>{
     const teacher=state.boot.teachers.find(t=>t.id===state.editTeacherId);
     ev.target.form.elements.reason.value=teacher?.review_flags?.[ev.target.value] || '';return;
   }
-  if(ev.target.id==='teacher-role'){
-    const director=ev.target.value==='director';
-    document.getElementById('teacher-pay-fields').hidden=director;
-    document.getElementById('teacher-amount').required=!director;
-    return;
-  }
+  if(['teacher-role','teacher-contract-kind'].includes(ev.target.id)){syncContractFields();return;}
   if(ev.target.id==='teacher-pay-type'){
     const type=ev.target.value;
-    document.getElementById('teacher-amount-label').textContent=`${PAY_LABEL[type]} (원/${type==='daily'?'근무일':type==='monthly'?'월':'시간'}) *`;
+    document.getElementById('teacher-amount-label').textContent=`${{hourly:'시간당 급여',daily:'일일 급여',monthly:'월 급여'}[type]} (원) *`;
     return;
   }
   if(ev.target.id!=='restore-file')return;

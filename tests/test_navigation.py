@@ -105,10 +105,14 @@ def test_teacher_history_and_work_updates(browser_page):
 
 def test_director_and_management_history(browser_page):
     page, base, tid = browser_page
+    playwright.expect(page.locator('.action-grid .action-card')).to_have_count(2)
+    playwright.expect(page.locator('.action-grid [data-action=manage]')).to_have_count(0)
     click(page, 'director')
     screen(page,'#director','원장님 로그인')
     login_ui(page,'admin')
     screen(page, '#director', '선생님별 월간 현황')
+    playwright.expect(page.locator('#app .summary-grid')).to_have_count(0)
+    playwright.expect(page.locator('.page-header [data-action=manage]')).to_be_visible()
     click(page, 'open-director-teacher')
     screen(page, f'#director/teacher/{tid}', '읽기 전용')
     assert page.locator('#work-form').count() == 0
@@ -125,6 +129,8 @@ def test_director_and_management_history(browser_page):
     screen(page, '#director', '선생님별 월간 현황')
     page.go_back()
     screen(page, '#home', '학원')
+    click(page, 'director')
+    screen(page, '#director', '선생님별 월간 현황')
     click(page, 'manage')
     screen(page, '#management', '신규 선생님 등록')
     click(page, 'tab-edit')
@@ -142,7 +148,7 @@ def test_director_and_management_history(browser_page):
     page.go_back()
     screen(page, '#management', '신규 선생님 등록')
     page.go_back()
-    screen(page, '#home', '학원')
+    screen(page, '#director', '선생님별 월간 현황')
     page.go_forward()
     screen(page, '#management', '신규 선생님 등록')
 
@@ -186,14 +192,16 @@ def test_ui_contract_registration_logout_and_access_guard(browser_page):
     page,base,tid=browser_page
     errors=[]
     page.on('pageerror',lambda error:errors.append(str(error)))
-    click(page,'manage')
-    screen(page,'#management','원장님 로그인')
+    click(page,'director')
+    screen(page,'#director','원장님 로그인')
     login_ui(page,'admin')
+    screen(page,'#director','선생님별 월간 현황')
+    click(page,'manage')
     screen(page,'#management','신규 선생님 등록')
     page.locator('#teacher-pay-type').select_option('daily')
-    playwright.expect(page.locator('#teacher-amount-label')).to_have_text('일급 (원/근무일) *')
+    playwright.expect(page.locator('#teacher-amount-label')).to_have_text('일일 급여 (원) *')
     page.locator('#teacher-pay-type').select_option('monthly')
-    playwright.expect(page.locator('#teacher-amount-label')).to_have_text('월급 (원/월) *')
+    playwright.expect(page.locator('#teacher-amount-label')).to_have_text('월 급여 (원) *')
     page.locator('#teacher-name').fill('월급 선생님')
     page.locator('#teacher-login').fill('monthly')
     page.locator('#teacher-password').fill(PASSWORD)
@@ -229,7 +237,7 @@ def test_ui_contract_registration_logout_and_access_guard(browser_page):
     login_ui(page)
     screen(page,f'#teacher/{tid}','출퇴근 시각 입력')
     page.goto(base+'/#management')
-    screen(page,'#management','원장님 로그인')
+    screen(page,'#management','접근 권한이 없습니다.')
     assert page.request.get(base+'/api/backup/excel').status==403
     assert not errors
 
@@ -242,8 +250,10 @@ def test_first_run_admin_setup_ui(browser_page,tmp_path):
     page.locator('#setup-form [name=login_id]').fill('firstadmin')
     page.locator('#setup-form [name=password]').fill(PASSWORD)
     page.locator('#setup-form [type=submit]').click()
-    screen(page,'#home','선생님 관리')
+    screen(page,'#home','선생님')
     playwright.expect(page.locator('#session-controls')).to_contain_text('테스트 원장님')
+    click(page,'director')
+    screen(page,'#director','선생님별 월간 현황')
     click(page,'manage')
     screen(page,'#management','신규 선생님 등록')
     page.screenshot(path=str(tmp_path/'v13-management.png'),full_page=True)
@@ -271,7 +281,9 @@ def test_four_digit_pin_validation_in_browser(browser_page):
         assert page.request.get(base+'/api/bootstrap').json()['setup_required']
     pin.fill('0123')
     page.locator('#setup-form [type=submit]').click()
-    screen(page,'#home','선생님 관리')
+    screen(page,'#home','선생님')
+    click(page,'director')
+    screen(page,'#director','선생님별 월간 현황')
     click(page,'manage')
     screen(page,'#management','신규 선생님 등록')
     playwright.expect(page.locator('#teacher-password')).to_have_attribute('pattern','[0-9]{4}')
@@ -308,3 +320,73 @@ def test_pin_rejects_typing_and_paste_without_changing_the_value(browser_page):
     page.evaluate("navigator.clipboard.writeText('23')")
     pin.press('ControlOrMeta+V')
     playwright.expect(pin).to_have_value('0123')
+
+
+def test_ratio_management_settlement_privacy_and_teacher_view(browser_page,tmp_path):
+    page,base,tid=browser_page
+    click(page,'director')
+    screen(page,'#director','원장님 로그인')
+    login_ui(page,'admin')
+    screen(page,'#director','선생님별 월간 현황')
+    click(page,'manage')
+    screen(page,'#management','신규 선생님 등록')
+    page.locator('#teacher-contract-kind').select_option('ratio')
+    playwright.expect(page.locator('#teacher-amount')).to_be_hidden()
+    playwright.expect(page.locator('#teacher-amount')).to_be_disabled()
+    page.locator('#teacher-share').fill('101')
+    page.locator('#teacher-contract-kind').select_option('fixed')
+    playwright.expect(page.locator('#teacher-share')).to_be_disabled()
+    assert page.locator('#teacher-share').evaluate('(el)=>!el.willValidate')
+    page.locator('#teacher-contract-kind').select_option('ratio')
+    for selector,value in [('#teacher-name','가상 비율 강사'),('#teacher-login','ratio-ui'),('#teacher-password',PASSWORD),('#teacher-phone','010-0000-1234'),('#teacher-bank-name','가상 은행'),('#teacher-account-number','000-111-222'),('#teacher-account-holder','가상 예금주'),('#teacher-share','60.25'),('#contract-date','2026-01-01')]:
+        page.locator(selector).fill(value)
+    playwright.expect(page.locator('#academy-share')).to_have_value('39.75')
+    page.locator('[name=default_deduction]').fill('10000')
+    page.locator('#create-teacher-form [type=submit]').click()
+    playwright.expect(page.locator('#teacher-name')).to_have_value('')
+    row=next(t for t in page.request.get(base+'/api/bootstrap').json()['teachers'] if t['login_id']=='ratio-ui')
+    ratio_id=row['id']
+    click(page,'director')  # Explicit management back action is the director screen.
+    screen(page,'#director','가상 비율 강사')
+    page.locator(f'[data-action=open-director-teacher][data-id="{ratio_id}"]').click()
+    route=f'#director/teacher/{ratio_id}'
+    screen(page,route,'비율제 월별 정산')
+    playwright.expect(page.locator('#settlement-form [name=tax_amount]')).to_have_value('')
+    playwright.expect(page.locator('#settlement-preview')).to_contain_text('실수령액 미입력')
+    page.locator('#settlement-form [name=revenue]').fill('1010000')
+    page.locator('#settlement-form [name=tax_amount]').fill('2500')
+    page.locator('#settlement-form [name=memo]').fill('원장 전용 가상 메모')
+    playwright.expect(page.locator('#settlement-preview')).to_contain_text('600,000원')
+    page.locator('#settlement-form [data-status=draft]').click()
+    playwright.expect(page.locator('.settlement-card > .pill')).to_have_text('정산 진행 중')
+    page.reload()
+    screen(page,route,'비율제 월별 정산')
+    page.locator('#settlement-form [data-status=completed]').click()
+    playwright.expect(page.locator('.settlement-card > .pill')).to_have_text('정산 완료')
+    page.locator('#settlement-form [name=tax_amount]').fill('3000')
+    page.once('dialog',lambda dialog:dialog.dismiss())
+    page.locator('#settlement-form [data-status=completed]').click()
+    page.once('dialog',lambda dialog:dialog.accept())
+    page.locator('#settlement-form [data-status=completed]').click()
+    playwright.expect(page.locator('.settlement-card details summary')).to_contain_text('3건')
+    page.screenshot(path=str(tmp_path/'ratio-settlement.png'),full_page=True)
+    # Canvas draw calls must never contain private contact/bank fields or academy allocations.
+    page.evaluate("() => {window.drawnText=[]; const old=CanvasRenderingContext2D.prototype.fillText; CanvasRenderingContext2D.prototype.fillText=function(t,...args){window.drawnText.push(String(t));return old.call(this,t,...args);};}")
+    click(page,'payslip')
+    screen(page,route+'/payslip','급여명세서')
+    page.wait_for_function('window.drawnText.length>20')
+    drawn=' '.join(page.evaluate('window.drawnText'))
+    for private in ('010-0000-1234','000-111-222','가상 은행','가상 예금주','원장 전용 가상 메모','학원 배분'):
+        assert private not in drawn
+    with page.expect_download() as downloaded: click(page,'download-png')
+    assert downloaded.value.suggested_filename.endswith('.png')
+    page.locator('#logout-button').click()
+    assert page.request.post(base+'/api/auth/login',data={'login_id':'ratio-ui','password':PASSWORD}).ok
+    page.goto(base+f'/#teacher/{ratio_id}')
+    screen(page,f'#teacher/{ratio_id}','출퇴근 시각 입력')
+    playwright.expect(page.locator('#app')).to_contain_text('599,500원')
+    for hidden in ('비율제','학원 배분','원장 전용 가상 메모','000-111-222','010-0000-1234','급여 계약'):
+        playwright.expect(page.locator('#app')).not_to_contain_text(hidden)
+    playwright.expect(page.locator('#settlement-form')).to_have_count(0)
+    page.goto(base+'/#management')
+    screen(page,'#management','접근 권한이 없습니다.')
