@@ -7,7 +7,7 @@ import urllib.request
 from fastapi.testclient import TestClient
 from app import create_app
 from desktop import InstanceLock, Service, configure_logging, read_service
-from tests.helpers import setup_admin
+from tests.helpers import setup_admin, register, login
 
 
 def test_exclusive_lock_and_recovery(tmp_path):
@@ -30,11 +30,17 @@ def test_storage_override_and_packaged_path(tmp_path, monkeypatch):
 def test_update_preserves_credentials_and_database(tmp_path):
     with TestClient(create_app(tmp_path)) as client:
         setup_admin(client)
+        tid = register(client).json()['teacher']['id']
+        login(client, 'teacher')
+        response = client.put(f'/api/teachers/{tid}/records/2026-08-03', json={'start_time':'15:00','end_time':'20:00'})
+        assert response.status_code == 200
+        payroll_before = response.json()['month']
     with sqlite3.connect(tmp_path / 'academy_payroll.sqlite3') as db:
         before = db.execute('SELECT password_hash FROM teachers').fetchone()[0]
     with TestClient(create_app(tmp_path)) as client:
         assert not client.get('/api/bootstrap').json()['setup_required']
         assert client.post('/api/auth/login', json={'login_id':'admin', 'password':'0123'}).status_code == 200
+        assert client.get(f'/api/teachers/{tid}/months/2026-08').json() == payroll_before
     with sqlite3.connect(tmp_path / 'academy_payroll.sqlite3') as db:
         assert db.execute('SELECT password_hash FROM teachers').fetchone()[0] == before
 

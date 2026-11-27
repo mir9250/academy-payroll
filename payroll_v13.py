@@ -5,6 +5,7 @@ import hmac
 import re
 import secrets
 import sqlite3
+from contextlib import closing
 from datetime import date, datetime
 
 from fastapi import HTTPException
@@ -52,7 +53,7 @@ def migrate(conn, backup_dir):
         return
     # A consistent backup is mandatory, and must succeed before any schema change.
     snapshot = backup_dir / f'마이그레이션전_v12_{datetime.now():%Y%m%d_%H%M%S_%f}.sqlite3'
-    with sqlite3.connect(snapshot) as dst:
+    with closing(sqlite3.connect(snapshot)) as dst:
         conn.backup(dst)
     try:
         conn.execute('BEGIN IMMEDIATE')

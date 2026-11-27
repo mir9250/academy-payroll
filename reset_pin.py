@@ -4,6 +4,7 @@ Run `python reset_pin.py` with the server stopped. No secret is passed via comma
 Importing this module never creates or migrates a database.
 """
 import getpass
+from contextlib import closing
 import os
 import sqlite3
 import time
@@ -18,7 +19,7 @@ from payroll_v13 import (LOGIN_COOLDOWN_SECONDS, LOGIN_FAILURE_LIMIT,
 
 def reset_pin(db_path, admin_login, admin_password, target_login, new_pin):
     db_path=Path(db_path).resolve(strict=True)
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         conn.row_factory=sqlite3.Row
         admin=conn.execute('SELECT * FROM teachers WHERE login_id=? COLLATE NOCASE',(admin_login,)).fetchone()
         key=f"account:{admin['id']}" if admin else 'unknown:local-reset'
@@ -39,7 +40,7 @@ def reset_pin(db_path, admin_login, admin_password, target_login, new_pin):
         backup_dir=db_path.parent/'backups'
         backup_dir.mkdir(exist_ok=True)
         snapshot=backup_dir/f'PIN재설정전_{datetime.now():%Y%m%d_%H%M%S_%f}.sqlite3'
-        with sqlite3.connect(snapshot) as dst:
+        with closing(sqlite3.connect(snapshot)) as dst:
             conn.backup(dst)
         conn.execute('BEGIN IMMEDIATE')
         # Recheck authorization after acquiring the write lock.

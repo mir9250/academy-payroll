@@ -6,6 +6,7 @@ Local accounts with server-side authorization and date-effective payroll contrac
 from __future__ import annotations
 
 import calendar
+from contextlib import closing, contextmanager
 import io
 import os
 import re
@@ -123,12 +124,17 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     db_path = target_dir / "academy_payroll.sqlite3"
     lock = threading.RLock()
 
-    def connect() -> sqlite3.Connection:
+    @contextmanager
+    def connect():
         conn = sqlite3.connect(db_path, timeout=15)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA busy_timeout = 15000")
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def initialize() -> None:
         with connect() as conn:
@@ -256,7 +262,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             # SQLite's online backup API produces a consistent snapshot.
             db_latest = backup_dir / "급여관리_최신.sqlite3"
             db_tmp = backup_dir / "_latest_working.sqlite3"
-            with sqlite3.connect(db_tmp) as dst:
+            with closing(sqlite3.connect(db_tmp)) as dst:
                 conn.backup(dst)
             os.replace(db_tmp,db_latest)
             today_folder = backup_dir / datetime.now().strftime("%Y-%m-%d")
@@ -689,7 +695,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
                 raise HTTPException(422,'현재 원장님 계정과 백업의 ID가 충돌합니다. 현재 관리자 계정을 보존할 수 없어 복원을 중단했습니다.')
             if not imported:teachers.append(principal)
             safe_path=backup_dir / f'복원전_안전백업_{datetime.now():%Y%m%d_%H%M%S_%f}.sqlite3'
-            with sqlite3.connect(safe_path) as dst:
+            with closing(sqlite3.connect(safe_path)) as dst:
                 conn.backup(dst)
             try:
                 conn.execute('BEGIN IMMEDIATE')

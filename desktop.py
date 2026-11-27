@@ -22,7 +22,7 @@ class InstanceLock:
     def acquire(self):
         self.file = self.path.open('a+b')
         self.file.seek(0)
-        if not self.file.read(1):
+        if os.fstat(self.file.fileno()).st_size == 0:
             self.file.write(b'0')
             self.file.flush()
         self.file.seek(0)
@@ -103,7 +103,8 @@ class Service:
         if self.server is None:
             raise OSError('No available local port')
         self.port = int(self.server.effective_port)
-        self.thread = threading.Thread(target=self.server.run, daemon=True)
+        self.stopping = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
         self.url = f'http://127.0.0.1:{self.port}'
         metadata = directory / 'service.json'
@@ -117,25 +118,38 @@ class Service:
                 raise OSError('Server readiness timeout')
             time.sleep(.1)
 
+    def _run(self):
+        from waitress import wasyncore
+        try:
+            while not self.stopping.is_set():
+                wasyncore.loop(timeout=.1, map=self.server._map, count=1)
+        except Exception:
+            logging.error('server failure')
+        finally:
+            # Close sockets on the select-loop thread (required on Windows).
+            wasyncore.close_all(map=self.server._map)
+
     def close(self):
         (self.directory / 'service.json').unlink(missing_ok=True)
         self.server.task_dispatcher.shutdown(timeout=15)
-        from waitress import wasyncore
-        wasyncore.close_all(map=self.server._map)
+        self.stopping.set()
         self.thread.join(timeout=5)
+        self.adapter.loop.call_soon_threadsafe(self.adapter.loop.stop)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--headless', action='store_true', help='CI only: no browser/control window')
     args = parser.parse_args()
-    directory = data_directory()
-    directory.mkdir(parents=True, exist_ok=True)
-    configure_logging(directory)
-    lock = InstanceLock(directory)
+    directory = None
+    lock = None
     service = None
     root = None
     try:
+        directory = data_directory()
+        directory.mkdir(parents=True, exist_ok=True)
+        configure_logging(directory)
+        lock = InstanceLock(directory)
         if not lock.acquire():
             for _ in range(150):
                 url = read_service(directory)
@@ -167,13 +181,17 @@ def main():
         logging.error('runtime failure')
         if not args.headless:
             import tkinter.messagebox
+            log_path = directory / 'logs' / 'errors.log' if directory else '사용자 데이터 폴더 접근 권한을 확인해 주세요.'
             tkinter.messagebox.showerror('급여관리 실행 오류',
-                f'프로그램을 실행하지 못했습니다. 실행 중인 창을 확인하고 다시 시도해 주세요.\n데이터를 삭제하지 마세요.\n오류 기록: {directory / "logs" / "errors.log"}')
+                f'프로그램을 실행하지 못했습니다. 실행 중인 창을 확인하고 다시 시도해 주세요.\n데이터를 삭제하지 마세요.\n오류 기록: {log_path}')
         return 1
     finally:
-        if service:
-            service.close()
-        lock.close()
+        try:
+            if service:
+                service.close()
+        finally:
+            if lock:
+                lock.close()
 
 
 if __name__ == '__main__':
