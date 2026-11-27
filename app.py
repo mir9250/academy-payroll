@@ -716,9 +716,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     return app
 
 
-app = create_app() if __name__ == "__main__" else None
-
 if __name__=="__main__":
+    app = create_app()
     import uvicorn
     print("학원 급여 관리: http://127.0.0.1:8000")
     uvicorn.run(app,host="127.0.0.1",port=8000)
