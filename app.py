@@ -19,6 +19,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from runtime_paths import data_directory
+
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -114,7 +116,7 @@ def minutes_between(start: str, end: str) -> int:
 
 
 def create_app(data_dir: str | Path | None = None) -> FastAPI:
-    target_dir = Path(data_dir or os.environ.get("PAYROLL_DATA_DIR") or ROOT / "data").resolve()
+    target_dir = Path(data_dir or data_directory()).resolve()
     backup_dir = target_dir / "backups"
     target_dir.mkdir(parents=True, exist_ok=True)
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -714,7 +716,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     return app
 
 
-app=create_app()
+app = create_app() if __name__ == "__main__" else None
 
 if __name__=="__main__":
     import uvicorn

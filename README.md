@@ -119,3 +119,94 @@ PAYROLL_DATA_DIR=$(mktemp -d) .venv/bin/python -m pytest -q
 ```
 
 설치된 Chrome으로 검증하려면 `PLAYWRIGHT_CHANNEL=chrome` 환경 변수를 추가합니다. Playwright가 없으면 브라우저 테스트는 생략됩니다. 테스트는 임시 디렉터리에서 실행되어 실제 SQLite와 백업을 변경하지 않습니다.
+
+## Windows 배포판 (Python 설치 불필요)
+
+기존 개발용 실행 방법과 별도로 `AcademyPayroll.exe` 단일 실행 파일을 제공합니다.
+현재 저장소가 빈 상태에서 시작되어 배포 브랜치에만 업로드했으며, 아래 다운로드는
+**Windows package 워크플로가 성공한 이후** 사용할 수 있습니다.
+
+### 다운로드·실행·종료
+
+1. GitHub 저장소 → **Actions → Windows package → 성공한 실행**을 엽니다.
+2. **Artifacts → AcademyPayroll-windows-x64-…** ZIP을 다운로드하고 압축을 풉니다.
+   Artifact 다운로드에는 GitHub 로그인이 필요하며 보관 기간은 30일입니다.
+   `v*` 태그 빌드는 검토용 Draft Release도 생성합니다. 공개 Release는 검토 후 게시합니다.
+3. `AcademyPayroll.exe`를 더블클릭합니다. 서버 준비가 끝나면 기본 브라우저가 열립니다.
+   Python·pip 설치나 인터넷 연결이 필요하지 않습니다. Windows 64비트 전용입니다.
+4. 최초 화면에서 원장님 이름·아이디·**숫자 4자리 PIN**을 직접 설정합니다.
+   기존 DB를 이전했다면 기존 비밀번호를 사용합니다. 기본 비밀번호는 없습니다.
+5. 실행 중인 **학원 급여관리** 창에서 **프로그램 종료**를 누르거나 창을 닫습니다.
+   브라우저를 닫아도 서버는 계속 실행됩니다. 동일 EXE를 다시 열면 기존 서비스에 접속합니다.
+
+서명하지 않은 EXE에 Windows SmartScreen 경고가 나타날 수 있습니다. 저장소와 빌드 결과를
+확인하고 조직의 실행 정책을 따라야 합니다. 다운로드에 동봉한 SHA256.txt로 파일을 비교할 수 있습니다.
+
+### 데이터 저장 위치·이전·업데이트
+
+배포판은 Windows 사용자 프로필의 **LocalAppData\\AcademyPayroll**을 사용합니다.
+탐색기 주소창에 `%LOCALAPPDATA%\\AcademyPayroll`을 입력하세요.
+
+- 원본 DB: `academy_payroll.sqlite3`
+- Excel·SQLite 자동 백업: `backups\\급여관리_최신.xlsx`, `backups\\급여관리_최신.sqlite3`
+- 날짜별 백업: `backups\\YYYY-MM-DD\\`
+- 오류 로그: `logs\\errors.log` (최대 512KB × 현재 파일과 보관본 3개)
+
+**이전 소스 버전에서 처음 배포판으로 이동할 때:** 이전 서버와 배포판을 모두 종료하고,
+기존 `data` 폴더 전체를 별도 위치에 안전하게 복사하세요. 그런 다음 기존 `data` 폴더의
+내용물(DB와 backups 폴더)을 `%LOCALAPPDATA%\\AcademyPayroll`로 복사합니다.
+목적지에 이미 DB가 있으면 덮어쓰지 말고 어느 것이 실제 운영 DB인지 먼저 확인하세요.
+복사 후 EXE를 실행하면 기존 ID·PIN 해시·급여·계약을 유지한 채 기존 마이그레이션을 적용합니다.
+Excel만 복원하면 새 계정의 PIN은 포함되지 않으므로 **기존 비밀번호 유지에는 SQLite 이전이 필요**합니다.
+폴더를 복사하지 않고 최초 실행하면 새 DB가 생성되며, 기존 폴더의 DB는 수정하지 않습니다.
+
+업데이트는 프로그램 종료 → 데이터 폴더 전체의 외부 백업 → 새 EXE로 교체 → 재실행 순서입니다.
+EXE 위치와 압축 해제 임시 폴더에는 운영 데이터를 저장하지 않습니다.
+`PAYROLL_DATA_DIR`은 개발·테스트용이며 배포판은 이를 무시합니다.
+Windows 사용자 계정이 바뀌면 데이터 경로도 바뀝니다. Windows 자체 계정과 파일 접근 권한을 관리하세요.
+
+### 백업·복원
+
+기존 **선생님 관리 → Excel 백업·복원**을 그대로 사용합니다.
+원장님 로그인 후 백업을 다운로드하고, 복원 전에는 현재 DB의 안전 백업을 자동 생성합니다.
+복원 후 다시 로그인해야 합니다. DB 전체 복사에는 PIN 해시가 포함되므로 외부 공개하지 마세요.
+주기적으로 프로그램을 종료하고 데이터 폴더 전체를 별도 저장소에 복사하세요.
+
+### 오류 해결
+
+- 창은 열렸지만 브라우저가 안 열리면 **급여관리 열기**를 누릅니다.
+- 8000 포트가 사용 중이면 8001~8005 중 사용 가능한 포트로 자동 이동합니다.
+  모두 점유되면 기존 프로그램을 정상 종료한 뒤 다시 실행하세요.
+- 이미 실행 중인데 열리지 않으면 기존 실행 창을 확인하세요. 강제 종료 후에는 다시 실행할 수 있습니다.
+  잠금 파일 자체는 남아도 OS 잠금이 풀리므로 수동 삭제할 필요가 없습니다.
+- 오류가 나면 데이터를 삭제하거나 초기화하지 말고 `logs\\errors.log`와 발생 상황을 확인하세요.
+  로그에는 요청 내용·PIN·급여·DB 내용·예외 메시지를 기록하지 않습니다.
+- 데이터가 비어 보이면 Windows 사용자 계정과 위의 이전 절차를 확인하세요.
+  기존 DB 위에 새 DB를 덮어쓰지 마세요.
+- 기존 장문 비밀번호의 로컬 PIN 변경 도구는 개발용 `reset_pin.py`에 남아 있습니다.
+  EXE에는 별도 PIN 우회·초기화 기능을 넣지 않았습니다.
+
+### 빌드·검증
+
+실제 백엔드는 Flask가 아닌 FastAPI입니다. API 및 기존 UI를 유지하기 위해
+Waitress와 a2wsgi의 ASGIMiddleware를 사용합니다. 서버는 127.0.0.1에만 바인딩합니다.
+
+Windows x64 Python 3.12 환경:
+
+```powershell
+python -m pip install -r requirements-build.txt
+python -m playwright install chromium
+python -m pytest -q
+python scripts/verify_distribution.py
+python -m PyInstaller --clean --noconfirm AcademyPayroll.spec
+python scripts/verify_distribution.py dist/AcademyPayroll.exe
+python scripts/smoke_executable.py dist/AcademyPayroll.exe
+```
+
+Smoke 검증은 운영 PC가 아닌 **데이터가 없는 깨끗한 Windows 테스트 사용자**에서만 실행하세요.
+가상 원장님을 생성하므로 기존 데이터 폴더가 있으면 즉시 중단합니다.
+CI는 테스트 실패 시 빌드를 중단하며, 빌드 후 EXE를 실제 실행해 리소스·중복 실행·종료·재시작·DB 보존을 확인합니다.
+버전·실행 번호·커밋별 Artifact와 사용한 의존성 버전을 보관합니다.
+단일 EXE는 시작할 때 임시 폴더에 리소스를 추출하며 운영 DB는 고정 경로에 남습니다.
+실제 학원 PC에서 백신 차단·추출 실패·시작 지연이 확인되면 onedir 전환을 검토합니다.
+macOS 빌드는 Windows 실행 검증을 대체하지 않으며 Windows EXE는 Windows Runner에서 생성해야 합니다.
