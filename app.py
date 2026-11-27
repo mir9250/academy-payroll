@@ -8,6 +8,7 @@ from __future__ import annotations
 import calendar
 from contextlib import closing, contextmanager
 import io
+import logging
 import os
 import re
 import shutil
@@ -275,8 +276,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
             if not day_sqlite.exists():
                 shutil.copy2(db_latest,day_sqlite)
             return {"ok":True,"message":"엑셀 및 SQLite 백업 갱신 완료"}
-        except Exception as exc:
-            return {"ok":False,"message":f"데이터베이스 저장은 완료되었으나 자동 백업이 실패했습니다: {exc}"}
+        except Exception:
+            logging.getLogger(__name__).error("Automatic backup failed")
+            return {"ok":False,"message":"데이터베이스 저장은 완료되었으나 자동 백업이 실패했습니다. 열려 있는 Excel 파일을 닫고 저장 공간과 백업 폴더의 쓰기 권한을 확인해 주세요."}
 
     def parse_restore(content):
         try:
